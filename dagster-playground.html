@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dagster Orchestration Playground — Snowflake-ish UI</title>
+  <meta name="description" content="Practice orchestration concepts (Dagster/Airflow style) in your browser: DAG design, retries/backoff, timeouts, sensors, SLAs, parameterized backfills, and idempotent writes." />
+  <meta name="theme-color" content="#0ea5e9" />
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          boxShadow: { glow: '0 0 0 2px rgba(14,165,233,.25), 0 10px 30px rgba(2,132,199,.25)' },
+          colors: {
+            snow: { 50:'#ecfeff',100:'#cffafe',200:'#a5f3fc',300:'#67e8f9',400:'#22d3ee',500:'#06b6d4',600:'#0891b2',700:'#0e7490',800:'#155e75',900:'#164e63' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+
+  <style>
+    body { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    code, pre, kbd, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    html { color-scheme: light; } html.dark { color-scheme: dark; }
+    .node { transition: box-shadow .2s, transform .1s; }
+    .node:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(2,132,199,.18); }
+    .dot { width:10px;height:10px;border-radius:9999px;display:inline-block }
+  </style>
+
+  <!-- Initial theme (avoid FOUC) -->
+  <script>
+    (function(){
+      try {
+        const ls = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const wantDark = ls ? (ls === 'dark') : prefersDark;
+        document.documentElement.classList.toggle('dark', wantDark);
+      } catch(_){}
+    })();
+  </script>
+</head>
+<body class="bg-sky-50/40 text-gray-900 dark:bg-gray-900 dark:text-gray-100 min-h-screen flex flex-col">
+  <!-- Topbar -->
+  <nav class="sticky top-0 z-50 backdrop-blur bg-white/70 dark:bg-gray-900/60 shadow">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="h-8 w-8 flex items-center justify-center rounded bg-sky-500 text-white shadow-glow">❄️</div>
+        <a class="font-extrabold text-xl md:text-2xl">Dagster Orchestration Playground</a>
+        <span class="hidden md:inline text-sm text-sky-700/80 dark:text-sky-200/80 ml-2">Snowflake-ish theme</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="theme-toggle" class="px-3 py-1.5 text-sm rounded-lg bg-sky-100 text-sky-800 hover:bg-sky-200 dark:bg-gray-700 dark:text-gray-100">🌗 Theme</button>
+        <a href="https://github.com/kmsmohamedansar" target="_blank" class="px-3 py-1.5 text-sm rounded-lg bg-sky-600 text-white hover:bg-sky-700 shadow-glow">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="max-w-7xl mx-auto w-full px-4 py-5 grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+    <!-- Sidebar controls -->
+    <aside class="bg-white dark:bg-gray-800 rounded-xl shadow p-4 h-fit">
+      <h2 class="font-semibold text-lg mb-2">⚙️ Run Config</h2>
+      <div class="space-y-3 text-sm">
+        <div>
+          <label class="block text-xs mb-1">Retries (per task)</label>
+          <input id="retries" type="number" min="0" max="5" value="2" class="w-full px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+        </div>
+        <div>
+          <label class="block text-xs mb-1">Backoff (seconds, exponential)</label>
+          <input id="backoff" type="number" min="1" max="60" value="3" class="w-full px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+        </div>
+        <div>
+          <label class="block text-xs mb-1">Task Timeout (seconds)</label>
+          <input id="timeout" type="number" min="1" max="120" value="15" class="w-full px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+        </div>
+        <div>
+          <label class="block text-xs mb-1">Failure injection (%)</label>
+          <input id="failrate" type="range" min="0" max="100" value="20" class="w-full">
+          <div class="text-xs text-gray-500"><span id="failrate-val">20</span>% chance a task attempt fails.</div>
+        </div>
+        <div class="pt-2">
+          <label class="block text-xs mb-1">Write mode</label>
+          <select id="write-mode" class="w-full px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+            <option value="merge">Idempotent MERGE (upsert)</option>
+            <option value="insert">INSERT only (duplicates possible)</option>
+          </select>
+        </div>
+        <div class="pt-2">
+          <label class="block text-xs mb-1">SLA Target (seconds)</label>
+          <input id="sla" type="number" min="1" max="300" value="20" class="w-full px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+        </div>
+      </div>
+
+      <hr class="my-4 border-gray-200 dark:border-gray-700">
+
+      <h2 class="font-semibold text-lg mb-2">📅 Backfill</h2>
+      <div class="space-y-2 text-sm">
+        <div class="flex gap-2">
+          <input id="start-date" type="date" class="flex-1 px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+          <input id="end-date" type="date" class="flex-1 px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="skip-success" type="checkbox" class="scale-110" checked>
+          <label for="skip-success">Skip already successful partitions</label>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="force-rerun" type="checkbox" class="scale-110">
+          <label for="force-rerun">Force rerun (ignore prior state)</label>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-7d" class="px-3 py-1.5 rounded bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-100">Last 7 days</button>
+          <button id="run-backfill" class="flex-1 px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-700 shadow-glow">Run Backfill</button>
+        </div>
+      </div>
+
+      <hr class="my-4 border-gray-200 dark:border-gray-700">
+
+      <h2 class="font-semibold text-lg mb-2">🛰️ Sensors</h2>
+      <div class="space-y-2 text-sm">
+        <div class="flex items-center gap-2">
+          <input id="sensor-enabled" type="checkbox" class="scale-110" checked>
+          <label for="sensor-enabled">file_sensor (landing/*.csv)</label>
+        </div>
+        <div class="flex gap-2">
+          <input id="sensor-date" type="date" class="flex-1 px-2 py-1 rounded bg-gray-50 dark:bg-gray-900 border dark:border-gray-700">
+          <button id="sensor-trigger" class="px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700">Simulate Arrival</button>
+        </div>
+        <div class="text-xs text-gray-500">Triggers a single-partition run for the given date.</div>
+      </div>
+
+      <hr class="my-4 border-gray-200 dark:border-gray-700">
+
+      <h2 class="font-semibold text-lg mb-2">✅ Quick Check</h2>
+      <div class="text-sm space-y-2">
+        <div class="p-2 rounded bg-sky-50 dark:bg-sky-900/30">How do you reprocess last 7 days without double-inserting?</div>
+        <details class="text-xs">
+          <summary class="cursor-pointer underline">Suggested approach</summary>
+          <ul class="list-disc pl-5 mt-1 space-y-1">
+            <li>Run a partitioned backfill for the last 7 days.</li>
+            <li>Make all write steps idempotent: write to staging then <code>MERGE</code> to target on keys (date, business_key).</li>
+            <li>Use <em>skip successful</em> or a watermark check to avoid reprocessing healthy partitions.</li>
+            <li>Tasks should be safe on rerun (delete-then-insert by partition, or merge/upsert semantics).</li>
+          </ul>
+        </details>
+      </div>
+    </aside>
+
+    <!-- Main area -->
+    <section class="space-y-5">
+      <!-- DAG Graph -->
+      <div class="rounded-xl shadow bg-white dark:bg-gray-800 p-4 border border-sky-200/50 dark:border-gray-700">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold text-lg">🗺️ DAG</h2>
+          <div class="flex items-center gap-2 text-sm">
+            <button id="run-now" class="px-3 py-1.5 rounded bg-sky-600 text-white hover:bg-sky-700 shadow-glow">Run Now (today)</button>
+            <span class="text-xs text-gray-500">Status: <span id="status-text" class="text-gray-600 dark:text-gray-300">Idle</span></span>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-4">
+          <div class="node p-4 rounded-xl border bg-sky-50 dark:bg-gray-900 border-sky-200/70 dark:border-gray-700">
+            <div class="font-semibold">extract_raw</div>
+            <div class="text-xs text-gray-500">S3 → landing (partitioned by date)</div>
+            <div class="mt-2 text-xs">Retries: <span class="font-mono" id="info-r-ex">2</span>, Timeout: <span class="font-mono" id="info-t-ex">15s</span></div>
+          </div>
+          <div class="node p-4 rounded-xl border bg-sky-50 dark:bg-gray-900 border-sky-200/70 dark:border-gray-700">
+            <div class="font-semibold">transform_clean</div>
+            <div class="text-xs text-gray-500">dbt-like normalization (per date)</div>
+            <div class="mt-2 text-xs">Retries: <span class="font-mono" id="info-r-tr">2</span>, Timeout: <span class="font-mono" id="info-t-tr">15s</span></div>
+          </div>
+          <div class="node p-4 rounded-xl border bg-sky-50 dark:bg-gray-900 border-sky-200/70 dark:border-gray-700">
+            <div class="font-semibold">load_warehouse</div>
+            <div class="text-xs text-gray-500">MERGE into fact_orders</div>
+            <div class="mt-2 text-xs">Retries: <span class="font-mono" id="info-r-lo">2</span>, Timeout: <span class="font-mono" id="info-t-lo">15s</span></div>
+          </div>
+        </div>
+        <div class="mt-3 text-xs text-gray-500">Dependencies: extract_raw → transform_clean → load_warehouse</div>
+      </div>
+
+      <!-- Runs & Logs -->
+      <div class="rounded-xl shadow bg-white dark:bg-gray-800 p-4 border border-sky-200/50 dark:border-gray-700">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold text-lg">📜 Runs</h2>
+          <div class="flex items-center gap-2 text-sm">
+            <button id="export-json" class="px-3 py-1.5 rounded bg-gray-200 dark:bg-gray-700">Export JSON</button>
+            <button id="clear-state" class="px-3 py-1.5 rounded bg-rose-600 text-white">Clear State</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="table-auto border-collapse border border-sky-200 dark:border-gray-700 w-full text-sm">
+            <thead>
+              <tr class="bg-sky-100/70 dark:bg-gray-700">
+                <th class="border px-2 py-1">Run ID</th>
+                <th class="border px-2 py-1">Partition (date)</th>
+                <th class="border px-2 py-1">extract_raw</th>
+                <th class="border px-2 py-1">transform_clean</th>
+                <th class="border px-2 py-1">load_warehouse</th>
+                <th class="border px-2 py-1">Write Mode</th>
+                <th class="border px-2 py-1">Duration</th>
+                <th class="border px-2 py-1">SLA</th>
+              </tr>
+            </thead>
+            <tbody id="runs-body"></tbody>
+          </table>
+        </div>
+        <div class="mt-3">
+          <h3 class="font-semibold">Logs</h3>
+          <pre id="logs" class="bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded p-3 text-xs overflow-auto max-h-52"></pre>
+        </div>
+      </div>
+
+      <!-- Practice prompts -->
+      <div class="rounded-xl shadow bg-white dark:bg-gray-800 p-4 border border-sky-200/50 dark:border-gray-700">
+        <h2 class="font-semibold text-lg mb-2">🧠 Practice Prompts</h2>
+        <ul class="list-disc pl-6 text-sm space-y-1 text-gray-700 dark:text-gray-300">
+          <li>Design retries/backoff so transient failures resolve without blowing SLAs.</li>
+          <li>Run a backfill for a date window with <em>skip successful</em> toggled on/off. Inspect duplicates when using INSERT-only.</li>
+          <li>Trigger the sensor for a missing day and ensure only that partition runs.</li>
+          <li>Tune timeouts to fail fast on stuck steps, verify downstream skip semantics.</li>
+          <li>Explain how this maps to Dagster: job with daily partitions, ops, sensors, and a schedule.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="text-center py-6 text-gray-500 dark:text-gray-400 text-sm">
+    Built by Mohamed • Simulated Dagster concepts in-browser • Snowflake-ish UI
+  </footer>
+
+  <script>
+    // THEME
+    (function(){
+      const btn = document.getElementById('theme-toggle');
+      const root = document.documentElement;
+      function setTheme(t){ root.classList.toggle('dark', t === 'dark'); try{ localStorage.setItem('theme', t); }catch(_){} }
+      btn?.addEventListener('click', ()=> setTheme(root.classList.contains('dark') ? 'light' : 'dark'));
+    })();
+
+    // STATE
+    const state = {
+      runs: JSON.parse(localStorage.getItem('dag_runs') || '[]'),
+      warehouse: JSON.parse(localStorage.getItem('dag_wh') || '{}'), // { 'YYYY-MM-DD': { rows: n, lastWriteMode: 'merge'|'insert' } }
+      nextRunId: Number(localStorage.getItem('dag_next_id') || '1')
+    };
+
+    function persist(){
+      localStorage.setItem('dag_runs', JSON.stringify(state.runs));
+      localStorage.setItem('dag_wh', JSON.stringify(state.warehouse));
+      localStorage.setItem('dag_next_id', String(state.nextRunId));
+    }
+
+    // UTILS
+    const fmtMs = ms => `${ms} ms`;
+    const pad = n => String(n).padStart(2,'0');
+    const toDateStr = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const rangeDays = (start, endExcl) => {
+      const out = []; const s = new Date(start), e = new Date(endExcl);
+      for(let d=new Date(s); d<e; d.setDate(d.getDate()+1)) out.push(toDateStr(d));
+      return out;
+    };
+
+    // LOGGING
+    const logEl = document.getElementById('logs');
+    function log(msg){
+      const ts = new Date().toISOString().replace('T',' ').slice(0,19);
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // RENDER RUNS TABLE
+    const runsBody = document.getElementById('runs-body');
+    function badge(status){
+      const map = { success:'bg-emerald-100 text-emerald-800', failed:'bg-rose-100 text-rose-800', skipped:'bg-gray-100 text-gray-700', running:'bg-amber-100 text-amber-800', timeout:'bg-rose-100 text-rose-800' };
+      return `<span class="px-2 py-0.5 rounded text-xs ${map[status]||'bg-gray-100'}">${status}</span>`;
+    }
+    function slaBadge(ok){ return ok? '<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-800">met</span>' : '<span class="px-2 py-0.5 rounded text-xs bg-rose-100 text-rose-800">missed</span>'; }
+
+    function render(){
+      runsBody.innerHTML = state.runs.slice().reverse().map(r => `
+        <tr>
+          <td class="border px-2 py-1 font-mono">${r.id}</td>
+          <td class="border px-2 py-1 font-mono">${r.partition}</td>
+          <td class="border px-2 py-1">${badge(r.steps.extract.status)}</td>
+          <td class="border px-2 py-1">${badge(r.steps.transform.status)}</td>
+          <td class="border px-2 py-1">${badge(r.steps.load.status)}</td>
+          <td class="border px-2 py-1">${r.writeMode}</td>
+          <td class="border px-2 py-1 font-mono">${fmtMs(r.durationMs)}</td>
+          <td class="border px-2 py-1">${slaBadge(r.slaMet)}</td>
+        </tr>`).join('');
+
+      // Update node captions (retries/timeouts)
+      document.getElementById('info-r-ex').textContent = document.getElementById('retries').value;
+      document.getElementById('info-r-tr').textContent = document.getElementById('retries').value;
+      document.getElementById('info-r-lo').textContent = document.getElementById('retries').value;
+      document.getElementById('info-t-ex').textContent = document.getElementById('timeout').value + 's';
+      document.getElementById('info-t-tr').textContent = document.getElementById('timeout').value + 's';
+      document.getElementById('info-t-lo').textContent = document.getElementById('timeout').value + 's';
+
+      // Failure rate display
+      document.getElementById('failrate-val').textContent = document.getElementById('failrate').value;
+    }
+
+    // CORE SIMULATION
+    function randMs(min, max){ return Math.floor(Math.random()*(max-min+1))+min; }
+    function chance(pct){ return Math.random()*100 < pct; }
+
+    async function runPartition(dateStr, opts){
+      const retries = Number(document.getElementById('retries').value);
+      const backoff = Number(document.getElementById('backoff').value);
+      const timeout = Number(document.getElementById('timeout').value) * 1000; // ms
+      const failrate = Number(document.getElementById('failrate').value);
+      const writeMode = document.getElementById('write-mode').value;
+      const slaTarget = Number(document.getElementById('sla').value) * 1000;
+
+      const run = { id: state.nextRunId++, partition: dateStr, writeMode,
+        startedAt: Date.now(), durationMs: 0, slaMet: true,
+        steps:{
+          extract:{status:'running', attempts:0},
+          transform:{status:'skipped', attempts:0},
+          load:{status:'skipped', attempts:0}
+        }
+      };
+      state.runs.push(run); persist(); render();
+
+      function setStatus(msg){ document.getElementById('status-text').textContent = msg; }
+
+      async function doStep(name, fn){
+        const step = run.steps[name];
+        let attempt = 0; let delay = 0; const start = Date.now();
+        while (attempt <= retries){
+          attempt++; step.attempts = attempt; step.status = 'running'; render();
+          const begin = Date.now();
+          const res = await fn();
+          const elapsed = Date.now() - begin;
+          if (elapsed > timeout){ step.status = 'timeout'; render(); return false; }
+          if (res){ step.status = 'success'; render(); return true; }
+          step.status = 'failed'; render();
+          if (attempt <= retries){ delay = Math.pow(2, attempt-1) * backoff * 200; // accelerated backoff (x200ms)
+            log(`retrying ${name} in ${delay}ms`); await new Promise(r=>setTimeout(r, delay)); }
+        }
+        return false;
+      }
+
+      // extract
+      setStatus(`Running ${dateStr} • extract`);
+      const ok1 = await doStep('extract', async ()=>{
+        await new Promise(r=>setTimeout(r, randMs(120,350)));
+        return !chance(failrate);
+      });
+      if(!ok1){ finish(); return run; }
+
+      // transform
+      setStatus(`Running ${dateStr} • transform`);
+      const ok2 = await doStep('transform', async ()=>{
+        await new Promise(r=>setTimeout(r, randMs(120,350)));
+        return !chance(failrate*0.7); // slightly more reliable
+      });
+      if(!ok2){ finish(); return run; }
+
+      // load (idempotent vs insert)
+      setStatus(`Running ${dateStr} • load`);
+      const ok3 = await doStep('load', async ()=>{
+        await new Promise(r=>setTimeout(r, randMs(120,350)));
+        // emulate writing N rows for the partition
+        const N = 100; // fixed for demo
+        const wh = state.warehouse[dateStr] || { rows:0, lastWriteMode:null };
+        if (writeMode === 'merge'){
+          wh.rows = N; // upsert by partition key → overwrite to N
+        } else {
+          wh.rows += N; // insert-only duplicates accumulate
+        }
+        wh.lastWriteMode = writeMode;
+        state.warehouse[dateStr] = wh; persist();
+        return !chance(failrate*0.5);
+      });
+      if(!ok3){ finish(); return run; }
+
+      function finish(){
+        run.durationMs = Date.now() - run.startedAt; run.slaMet = run.durationMs <= slaTarget; persist(); render(); setStatus('Idle');
+        const wh = state.warehouse[dateStr];
+        if (wh) log(`partition ${dateStr} → warehouse rows=${wh.rows} (mode=${wh.lastWriteMode})`);
+      }
+
+      finish();
+      return run;
+    }
+
+    // ACTIONS
+    document.getElementById('run-now').addEventListener('click', async ()=>{
+      const today = toDateStr(new Date());
+      log(`manual run for ${today}`);
+      await runPartition(today, {});
+    });
+
+    document.getElementById('btn-7d').addEventListener('click', ()=>{
+      const end = new Date(); const start = new Date(); start.setDate(end.getDate()-7);
+      document.getElementById('start-date').value = toDateStr(start);
+      document.getElementById('end-date').value = toDateStr(end);
+    });
+
+    document.getElementById('run-backfill').addEventListener('click', async ()=>{
+      const s = document.getElementById('start-date').value;
+      const e = document.getElementById('end-date').value;
+      if(!s || !e){ alert('Pick start & end dates'); return; }
+      const skip = document.getElementById('skip-success').checked;
+      const force = document.getElementById('force-rerun').checked;
+      const days = rangeDays(s, e);
+      for (const d of days){
+        if (skip && state.runs.some(r=> r.partition===d && r.steps.load.status==='success')){
+          log(`skip ${d} (already successful)`); continue;
+        }
+        if (!force && state.warehouse[d] && document.getElementById('write-mode').value==='insert'){
+          log(`warning: ${d} has existing rows in INSERT mode → duplicates possible`);
+        }
+        await runPartition(d,{});
+      }
+    });
+
+    document.getElementById('sensor-trigger').addEventListener('click', async ()=>{
+      const enabled = document.getElementById('sensor-enabled').checked;
+      if(!enabled){ alert('Sensor disabled'); return; }
+      const d = document.getElementById('sensor-date').value || toDateStr(new Date());
+      log(`sensor detected landing/file_${d}.csv → triggering partition ${d}`);
+      await runPartition(d,{});
+    });
+
+    document.getElementById('export-json').addEventListener('click', ()=>{
+      const data = { runs: state.runs, warehouse: state.warehouse };
+      const blob = new Blob([JSON.stringify(data,null,2)], { type:'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='dag_state.json'; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(url); a.remove();},0);
+    });
+
+    document.getElementById('clear-state').addEventListener('click', ()=>{
+      if (!confirm('Clear all runs and warehouse state?')) return;
+      state.runs = []; state.warehouse = {}; state.nextRunId = 1; persist(); render(); log('state cleared');
+    });
+
+    // INIT
+    (function init(){
+      render();
+      log('ready • define config, then run now/backfill or trigger sensor');
+    })();
+  </script>
+</body>
+</html>
